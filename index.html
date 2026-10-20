@@ -277,7 +277,7 @@
         <div class="search-row"><input type="text" id="desem-buscar" placeholder="Buscar por código, cliente o entidad..."></div>
         <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>Código</th><th>Tipo</th><th>Cliente</th><th>Entidad</th><th>Origen</th><th>Fecha</th><th>Monto</th></tr></thead>
+          <thead><tr><th>Código</th><th>Tipo</th><th>Cliente</th><th>Entidad</th><th>Origen</th><th>Fecha desemb.</th><th>Monto</th></tr></thead>
           <tbody id="desem-tbody"></tbody>
         </table>
         </div>
@@ -291,7 +291,9 @@
         <div class="grid-inline">
           <div class="field"><label>Tipo de producto</label><select id="d-tipo"></select></div>
           <div class="field"><label>Origen</label><select id="d-origen"><option value="derivacion">Desde oportunidad</option><option value="directo">Directo</option></select></div>
+          <div class="field"><label>Fecha de desembolso</label><input type="date" id="d-fecha-desembolso"></div>
         </div>
+        <p class="sub" id="d-fecha-desembolso-ayuda" style="margin:6px 0 0"></p>
 
         <div id="d-origen-derivacion" style="margin-top:12px">
           <div class="field"><label>Selecciona la derivación abierta</label><select id="d-derivacion-select"></select></div>
@@ -937,7 +939,7 @@ async function actualizarDatos(){
    AAAA.MM.DD (y .2, .3… si se publica más de una vez el mismo día). Es solo una etiqueta: no compara
    contra nada ni muestra alertas (el aviso automático de "versión desactualizada" se descartó a propósito,
    ver "Distribución del frontend" en CLAUDE.md). */
-const APP_VERSION = '2026.09.28.3';
+const APP_VERSION = '2026.10.20';
 function mostrarVersionApp_(){
   document.querySelectorAll('.app-version').forEach(el=>{ el.textContent = 'v' + APP_VERSION; });
 }
@@ -1570,6 +1572,37 @@ function formatFecha(iso){
   return d.toLocaleString('es-PE',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'});
 }
 
+/* ---- Fecha de desembolso (convención #45, pedido 2026-10-20) ----
+   La fecha REAL del desembolso, que puede registrarse unos días después (cierre de mes). Define el
+   año/mes en que cuenta la operación (penetración y comisión). Regla: entre 5 días antes de la fecha
+   de REGISTRO y la fecha de registro (nunca futura). Siempre en hora local: toISOString() da UTC y en
+   Perú, después de las 19:00, ya sería "mañana". Registros viejos sin el campo: vale la de registro. */
+const DIAS_ATRAS_FECHA_DESEMBOLSO = 5;
+function fechaLocalISO_(d){
+  const f = (d instanceof Date) ? d : new Date(d);
+  return `${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,'0')}-${String(f.getDate()).padStart(2,'0')}`;
+}
+function fechaDesembolsoDe_(x){ return x.fecha_desembolso || fechaLocalISO_(x.fecha_registro); }
+function rangoFechaDesembolso_(fechaRegistro){
+  const base = new Date(fechaRegistro);
+  const min = new Date(base.getFullYear(), base.getMonth(), base.getDate() - DIAS_ATRAS_FECHA_DESEMBOLSO);
+  return { min: fechaLocalISO_(min), max: fechaLocalISO_(base) };
+}
+function formatFechaDia_(isoDia){
+  if(!isoDia) return '';
+  const [a,m,d] = isoDia.split('-');
+  return `${d}/${m}/${a}`;
+}
+const NOMBRES_MES_ = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+function prepararCampoFechaDesembolso_(fechaRegistro, valor){
+  const el = document.getElementById('d-fecha-desembolso');
+  const r = rangoFechaDesembolso_(fechaRegistro);
+  el.min = r.min; el.max = r.max;
+  el.value = valor || r.max;
+  document.getElementById('d-fecha-desembolso-ayuda').textContent =
+    `Fecha real del desembolso: entre el ${formatFechaDia_(r.min)} y el ${formatFechaDia_(r.max)}. Define el mes en que cuenta para la comisión.`;
+}
+
 /* Siguiente número de un correlativo = el MAYOR número existente con ese prefijo + 1, nunca
    "cantidad de claves + 1". Contar fallaba en cuanto la numeración tenía un hueco (un registro
    borrado, o uno que no vino en la migración): el código generado ya existía, el upsert por código lo
@@ -2068,6 +2101,12 @@ function initFormDesembolso(){
   document.getElementById('btn-cancelar-edicion').style.display = 'none';
   document.getElementById('d-obs-historial').innerHTML = '';
   document.getElementById('d-obs-nueva').value = '';
+  if(editingDesembolsoCodigo){
+    const xEd = miData.desembolsos[editingDesembolsoCodigo];
+    prepararCampoFechaDesembolso_(xEd.fecha_registro, fechaDesembolsoDe_(xEd));
+  } else {
+    prepararCampoFechaDesembolso_(new Date());
+  }
 
   if(editingDesembolsoCodigo){
     cargarDesembolsoParaEditar();
@@ -2996,6 +3035,18 @@ async function guardarDesembolso(){
     msg.textContent=`No se guardó: el código ${codigo} ya existe. Pulsa "↻ Actualizar" y vuelve a intentarlo; si se repite, avisa a un administrador.`; msg.classList.add('err'); return;
   }
   const registroPrevio = editingDesembolsoCodigo ? miData.desembolsos[editingDesembolsoCodigo] : null;
+  // Fecha de desembolso (convención #45): obligatoria, entre 5 días antes del REGISTRO y el registro.
+  // Al editar, el rango se mide contra la fecha en que se registró, no contra hoy.
+  const fechaDesembolso = document.getElementById('d-fecha-desembolso').value;
+  const rangoFD = rangoFechaDesembolso_(registroPrevio ? registroPrevio.fecha_registro : now);
+  if(!fechaDesembolso){
+    msg.textContent='Indica la fecha de desembolso.'; msg.classList.add('err'); return;
+  }
+  if(fechaDesembolso < rangoFD.min || fechaDesembolso > rangoFD.max){
+    msg.textContent=`La fecha de desembolso debe estar entre el ${formatFechaDia_(rangoFD.min)} y el ${formatFechaDia_(rangoFD.max)} (hasta ${DIAS_ATRAS_FECHA_DESEMBOLSO} días antes del registro, nunca futura).`;
+    msg.classList.add('err'); return;
+  }
+  const [anioFD, mesFD] = fechaDesembolso.split('-').map(Number);
   const observaciones = registroPrevio ? [...(registroPrevio.observaciones||[])] : [];
   if(nuevaObs) observaciones.push({fecha: now.toISOString(), texto: nuevaObs, usuario: currentUser.codigo});
 
@@ -3006,8 +3057,10 @@ async function guardarDesembolso(){
     codigo, tipo, origen,
     derivacion_codigo: opCodigo, derivacion_linea: lineaId,
     fecha_registro: registroPrevio ? registroPrevio.fecha_registro : now.toISOString(),
-    anio: registroPrevio ? registroPrevio.anio : now.getFullYear(),
-    mes: registroPrevio ? registroPrevio.mes : now.getMonth()+1,
+    // Año/mes de la OPERACIÓN = los de la fecha de desembolso (antes: los del registro).
+    fecha_desembolso: fechaDesembolso,
+    anio: anioFD,
+    mes: mesFD,
     sede, marca, cliente,
     /* El DNI se resuelve SIEMPRE, venga de oportunidad o directo. Antes era
        `origen==='directo' ? buscarDniVendedor(...) : ''` — o sea que todo desembolso creado desde una
@@ -3049,6 +3102,9 @@ async function guardarDesembolso(){
   // UI optimista: mismo criterio que el guardado de oportunidad — confirma y navega de inmediato,
   // el guardado real viaja en paralelo y se reintenta solo si falla (ver comentario en form-cabecera).
   msg.textContent = editingDesembolsoCodigo ? `Cambios guardados en ${codigo}.` : `Desembolso guardado: ${codigo}`;
+  if(anioFD !== now.getFullYear() || mesFD !== now.getMonth()+1){
+    msg.textContent += ` Cuenta en ${NOMBRES_MES_[mesFD-1]} ${anioFD} (por su fecha de desembolso).`;
+  }
   msg.classList.add('ok');
   /* Si el vendedor no se pudo resolver a un DNI, la operación se guarda igual (no se le bloquea el
      trabajo al F&I) pero se avisa fuerte: sin DNI esa operación NO cuenta para su penetración, y antes
@@ -3100,7 +3156,7 @@ function renderFiltrosDesemLista(){
 function renderDesemLista(){
   const tbody = document.getElementById('desem-tbody');
   const q = (document.getElementById('desem-buscar').value||'').toLowerCase();
-  let items = Object.values(miData.desembolsos||{}).sort((a,b)=> new Date(b.fecha_registro)-new Date(a.fecha_registro));
+  let items = Object.values(miData.desembolsos||{}).sort((a,b)=> fechaDesembolsoDe_(b).localeCompare(fechaDesembolsoDe_(a)) || new Date(b.fecha_registro)-new Date(a.fecha_registro));
   items = items.filter(x=>{
     if(desemListaFiltros.anio && x.anio!=desemListaFiltros.anio) return false;
     if(desemListaFiltros.mes && x.mes!=desemListaFiltros.mes) return false;
@@ -3123,7 +3179,7 @@ function renderDesemLista(){
       <td>${x.cliente.nombre_completo}</td>
       <td>${entidad}</td>
       <td style="font-size:11px;color:var(--muted)">${x.origen==='derivacion'?'Desde oportunidad':'Directo'}</td>
-      <td>${formatFecha(x.fecha_registro)}</td>
+      <td>${formatFechaDia_(fechaDesembolsoDe_(x))}${fechaDesembolsoDe_(x)!==fechaLocalISO_(x.fecha_registro)?`<div style="font-size:11px;color:var(--muted)">Reg. ${formatFechaDia_(fechaLocalISO_(x.fecha_registro))}</div>`:''}</td>
       <td>${fmtMoneda(monto)}</td>
     </tr>`;
   }).join('');
@@ -9335,7 +9391,7 @@ function abrirModalDetalleDesembolso(codigoEjecutivo, codigoDesembolso){
   }).join('') : '';
   document.getElementById('modal-detalle-op-body').innerHTML = `
     <h2 style="font-size:16px"><span class="cod">${x.codigo}</span> ${x.cliente ? x.cliente.nombre_completo : '—'}</h2>
-    <p class="sub">${x.tipo} · ${entidadDeDesembolso(x)} · ${x.sede} · ${x.marca} · Vendedor: ${x.vendedor.nombre} · Ejecutivo: ${nombreEjecutivoElim(codigoEjecutivo)} · Registrado ${formatFecha(x.fecha_registro)}</p>
+    <p class="sub">${x.tipo} · ${entidadDeDesembolso(x)} · ${x.sede} · ${x.marca} · Vendedor: ${x.vendedor.nombre} · Ejecutivo: ${nombreEjecutivoElim(codigoEjecutivo)} · Desembolsado ${formatFechaDia_(fechaDesembolsoDe_(x))} · Registrado ${formatFecha(x.fecha_registro)}</p>
     <p class="sub" style="font-weight:600;text-transform:uppercase;font-size:11px;margin-top:14px">Solo lectura — para editar o cargar documentos, el ejecutivo dueño debe hacerlo desde su propia cuenta.</p>
     ${adjuntosHtml ? `<p class="sub" style="font-weight:600;text-transform:uppercase;font-size:11px;margin-top:14px">Documentos adjuntos</p><div>${adjuntosHtml}</div>` : ''}
     ${(x.observaciones&&x.observaciones.length) ? `<p class="sub" style="font-weight:600;text-transform:uppercase;font-size:11px;margin-top:14px">Observaciones</p><div>${x.observaciones.map(o=>`<div>${formatFecha(o.fecha)} — ${o.texto}</div>`).join('')}</div>` : ''}`;
